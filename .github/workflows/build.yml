@@ -1,0 +1,34 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Build debug APK
+        run: gradle assembleDebug
+
+      - name: Publish APK as a release (easy to download on the phone)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk Calculator.apk
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest Calculator.apk -t "Calculator APK" -n "Download Calculator.apk and open it on the phone to install."
