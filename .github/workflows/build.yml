@@ -23,7 +23,16 @@ jobs:
           gradle-version: "8.10.2"
 
       - name: Build debug APK
-        run: gradle assembleDebug
+        run: |
+          set -o pipefail
+          gradle assembleDebug 2>&1 | tee build.log
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          grep -E "^e: |error:|ERROR:|What went wrong" -A2 build.log | head -40 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
 
       - name: Publish APK as a release (easy to download on the phone)
         env:

@@ -1,14 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#FF0F1012</color>
-    <color name="fg">#FFF3F4F6</color>
-    <color name="muted">#FF8B9097</color>
-    <color name="divider">#FF24272B</color>
-    <color name="key_digit">#FF1C1E22</color>
-    <color name="key_func">#FF262A2F</color>
-    <color name="func_text">#FFC9D1D9</color>
-    <color name="accent">#FF5EE0A8</color>
-    <color name="on_accent">#FF0B2A1D</color>
-    <color name="ripple">#40FFFFFF</color>
-    <color name="error">#FFFF7B7B</color>
+    <color name="body">#FF1E2023</color>
+    <color name="brand">#FFE2AE45</color>
+    <color name="brand_dim">#FF8E9298</color>
+    <color name="divider">#FF2E3135</color>
+    <color name="accent">#FFE2AE45</color>
 </resources>

@@ -1,9 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">מחשבון</string>
-    <string name="backspace">מחק</string>
-    <string name="copied">הועתק</string>
-    <string name="max_digits">אפשר להזין עד 15 ספרות</string>
-    <string name="error_div0">אי אפשר לחלק באפס</string>
-    <string name="error_syntax">ביטוי לא תקין</string>
+    <string name="app_name">מחשבון מדעי</string>
 </resources>

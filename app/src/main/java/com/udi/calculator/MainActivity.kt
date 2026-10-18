@@ -1,288 +1,210 @@
 package com.udi.calculator
 
 import android.app.Activity
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.os.Bundle
+import android.text.Html
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
-import android.view.View
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 
 class MainActivity : Activity() {
 
-    private lateinit var expressionView: TextView
-    private lateinit var resultView: TextView
+    private val engine = Engine()
+    private lateinit var lcd: LcdView
 
-    /** The expression as typed, using the symbols + − × ÷ % ( ) . */
-    private var expr = ""
-    /** True right after '=' — the next digit starts a new calculation. */
-    private var justEvaluated = false
-    /** Error to show once on the result line. */
-    private var pendingError: Int? = null
+    private enum class Style { SHIFT, FUNC, NUM, OP, CLEAR }
 
-    private enum class Kind { DIGIT, FUNC, OP, EQUALS }
-    private class Key(val label: String, val kind: Kind, val action: () -> Unit)
+    private class Key(
+        val label: String,
+        val second: String?,
+        val style: Style,
+        val keepsHyp: Boolean = false,
+        val shifted: (() -> Unit)? = null,
+        val primary: () -> Unit,
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        lcd = findViewById(R.id.lcd)
 
-        expressionView = findViewById(R.id.expression)
-        resultView = findViewById(R.id.result)
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        engine.memory = prefs.getString(PREF_MEMORY, "0")?.toDoubleOrNull() ?: 0.0
+        engine.angle = runCatching { Engine.Angle.valueOf(prefs.getString(PREF_ANGLE, "DEG")!!) }
+            .getOrDefault(Engine.Angle.DEG)
 
-        val backspace = findViewById<ImageView>(R.id.backspace)
-        backspace.setOnClickListener { haptic(it); backspace(); refresh() }
-        backspace.setOnLongClickListener { haptic(it); clear(); refresh(); true }
-
-        expressionView.setOnLongClickListener {
-            if (expr.isNotEmpty()) {
-                val cm = getSystemService(ClipboardManager::class.java)
-                cm.setPrimaryClip(ClipData.newPlainText("result", expr.replace('−', '-')))
-                Toast.makeText(this, R.string.copied, Toast.LENGTH_SHORT).show()
-            }
-            true
-        }
-
-        savedInstanceState?.let {
-            expr = it.getString(STATE_EXPR, "")
-            justEvaluated = it.getBoolean(STATE_EVALUATED, false)
-        }
-
-        buildKeypad(findViewById(R.id.keypad))
-        refresh()
+        buildPad(findViewById(R.id.fnPad), functionRows(), withLabels = true)
+        buildPad(findViewById(R.id.numPad), numberRows(), withLabels = false)
+        render()
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        outState.putString(STATE_EXPR, expr)
-        outState.putBoolean(STATE_EVALUATED, justEvaluated)
+    override fun onPause() {
+        super.onPause()
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString(PREF_MEMORY, engine.memory.toString())
+            .putString(PREF_ANGLE, engine.angle.name)
+            .apply()
     }
 
-    // ---------- Keypad ----------
+    // ---------- Key layout ----------
 
-    private fun buildKeypad(keypad: LinearLayout) {
-        val rows = listOf(
-            listOf(
-                Key("C", Kind.FUNC) { clear() },
-                Key("( )", Kind.FUNC) { paren() },
-                Key("%", Kind.FUNC) { percent() },
-                Key("÷", Kind.OP) { operator('÷') },
-            ),
-            listOf(digitKey('7'), digitKey('8'), digitKey('9'), Key("×", Kind.OP) { operator('×') }),
-            listOf(digitKey('4'), digitKey('5'), digitKey('6'), Key("−", Kind.OP) { operator('−') }),
-            listOf(digitKey('1'), digitKey('2'), digitKey('3'), Key("+", Kind.OP) { operator('+') }),
-            listOf(
-                Key("±", Kind.FUNC) { negate() },
-                digitKey('0'),
-                Key(".", Kind.DIGIT) { dot() },
-                Key("=", Kind.EQUALS) { equals() },
-            ),
+    private fun sup(base: String, s: String) = "$base<sup><small>$s</small></sup>"
+
+    private fun functionRows(): List<List<Key>> = listOf(
+        listOf(
+            Key("SHIFT", null, Style.SHIFT, keepsHyp = true) { engine.shift = !engine.shift },
+            Key("DRG", null, Style.FUNC) { engine.cycleAngle() },
+            Key("hyp", null, Style.FUNC, keepsHyp = true) { engine.hyp = !engine.hyp },
+            Key("sin", sup("sin", "-1"), Style.FUNC, shifted = { engine.trig(Engine.Trig.SIN, true) }) {
+                engine.trig(Engine.Trig.SIN, false)
+            },
+            Key("cos", sup("cos", "-1"), Style.FUNC, shifted = { engine.trig(Engine.Trig.COS, true) }) {
+                engine.trig(Engine.Trig.COS, false)
+            },
+            Key("tan", sup("tan", "-1"), Style.FUNC, shifted = { engine.trig(Engine.Trig.TAN, true) }) {
+                engine.trig(Engine.Trig.TAN, false)
+            },
+        ),
+        listOf(
+            Key("√", sup("", "3") + "√", Style.FUNC, shifted = { engine.cbrtKey() }) { engine.sqrtKey() },
+            Key(sup("x", "2"), sup("x", "3"), Style.FUNC, shifted = { engine.cube() }) { engine.square() },
+            Key("log", sup("10", "x"), Style.FUNC, shifted = { engine.pow10() }) { engine.log() },
+            Key("ln", sup("e", "x"), Style.FUNC, shifted = { engine.expKey() }) { engine.lnKey() },
+            Key(sup("x", "y"), sup("x", "1/y"), Style.FUNC, shifted = { engine.op('r') }) { engine.op('^') },
+            Key(sup("x", "-1"), "x!", Style.FUNC, shifted = { engine.factorial() }) { engine.reciprocal() },
+        ),
+        listOf(
+            Key("±", null, Style.FUNC) { engine.negate() },
+            Key("(", null, Style.FUNC) { engine.openParen() },
+            Key(")", null, Style.FUNC) { engine.closeParen() },
+            Key("π", null, Style.FUNC) { engine.pi() },
+            Key("Min", "X↔M", Style.FUNC, shifted = { engine.swapM() }) { engine.min() },
+            Key("M+", "M−", Style.FUNC, shifted = { engine.mMinus() }) { engine.mPlus() },
+        ),
+    )
+
+    private fun numberRows(): List<List<Key>> {
+        fun d(ch: Char) = Key(ch.toString(), null, Style.NUM) { engine.digit(ch) }
+        return listOf(
+            listOf(d('7'), d('8'), d('9'),
+                Key("C", null, Style.CLEAR) { engine.clear() },
+                Key("AC", null, Style.CLEAR) { engine.allClear() }),
+            listOf(d('4'), d('5'), d('6'),
+                Key("×", null, Style.OP) { engine.op('*') },
+                Key("÷", null, Style.OP) { engine.op('/') }),
+            listOf(d('1'), d('2'), d('3'),
+                Key("+", null, Style.OP) { engine.op('+') },
+                Key("−", null, Style.OP) { engine.op('-') }),
+            listOf(d('0'),
+                Key(".", null, Style.NUM) { engine.dot() },
+                Key("EXP", null, Style.NUM) { engine.expEntry() },
+                Key("MR", null, Style.NUM) { engine.mr() },
+                Key("=", null, Style.OP) { engine.calc() }),
         )
-        val gap = dp(5)
+    }
+
+    private fun buildPad(pad: LinearLayout, rows: List<List<Key>>, withLabels: Boolean) {
+        val gapH = dp(4)
+        val gapV = dp(4)
         for (row in rows) {
             val rowLayout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            keypad.addView(rowLayout, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            pad.addView(rowLayout, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
             for (key in row) {
+                val cell = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                if (withLabels) {
+                    val label = TextView(this).apply {
+                        text = if (key.second != null) html(key.second) else ""
+                        setTextColor(Color.parseColor("#E2AE45"))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        gravity = Gravity.CENTER
+                        maxLines = 1
+                        includeFontPadding = false
+                    }
+                    cell.addView(label, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(17)))
+                }
+                cell.addView(keyView(key), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
                 val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                lp.setMargins(gap, gap, gap, gap)
-                rowLayout.addView(makeKeyView(key), lp)
+                lp.setMargins(gapH, gapV, gapH, gapV)
+                rowLayout.addView(cell, lp)
             }
         }
     }
 
-    private fun digitKey(d: Char) = Key(d.toString(), Kind.DIGIT) { inputDigit(d) }
+    private class Look(val face: Int, val edge: Int, val text: Int, val sizeSp: Float)
 
-    private fun makeKeyView(key: Key): View {
-        val bg: Int
-        val fg: Int
-        when (key.kind) {
-            Kind.DIGIT -> { bg = getColor(R.color.key_digit); fg = getColor(R.color.fg) }
-            Kind.FUNC -> { bg = getColor(R.color.key_func); fg = getColor(R.color.func_text) }
-            Kind.OP -> { bg = getColor(R.color.key_func); fg = getColor(R.color.accent) }
-            Kind.EQUALS -> { bg = getColor(R.color.accent); fg = getColor(R.color.on_accent) }
-        }
-        val radius = dp(48).toFloat()
-        val shape = GradientDrawable().apply { cornerRadius = radius; setColor(bg) }
-        val mask = GradientDrawable().apply { cornerRadius = radius; setColor(Color.WHITE) }
+    private fun lookFor(key: Key): Look = when (key.style) {
+        Style.SHIFT -> Look(0xFFD9A441.toInt(), 0xFF7E5C1C.toInt(), 0xFF1B1406.toInt(), 13f)
+        Style.FUNC -> Look(0xFF3A3E44.toInt(), 0xFF17181B.toInt(), 0xFFEDEEEF.toInt(), 16f)
+        Style.NUM -> Look(0xFF2B2E32.toInt(), 0xFF111214.toInt(), 0xFFF4F4F2.toInt(),
+            if (key.label.length > 1) 17f else 25f)
+        Style.OP -> Look(0xFF4B5057.toInt(), 0xFF222428.toInt(), 0xFFF4F4F2.toInt(), 25f)
+        Style.CLEAR -> Look(0xFFD8643A.toInt(), 0xFF7F361C.toInt(), 0xFFFFFFFF.toInt(), 18f)
+    }
+
+    private fun keyView(key: Key): TextView {
+        val look = lookFor(key)
+        val r = dp(9).toFloat()
+        val edge = GradientDrawable().apply { cornerRadius = r; setColor(look.edge) }
+        val face = GradientDrawable().apply { cornerRadius = r; setColor(look.face) }
+        val layers = LayerDrawable(arrayOf<Drawable>(edge, face))
+        layers.setLayerInset(1, 0, 0, 0, dp(3))
+        val mask = GradientDrawable().apply { cornerRadius = r; setColor(Color.WHITE) }
 
         return TextView(this).apply {
-            text = key.label
+            text = html(key.label)
             gravity = Gravity.CENTER
-            setTextColor(fg)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (key.kind == Kind.DIGIT) 30f else 27f)
-            background = RippleDrawable(ColorStateList.valueOf(getColor(R.color.ripple)), shape, mask)
+            setTextColor(look.text)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, look.sizeSp)
+            setPadding(0, 0, 0, dp(3))
+            background = RippleDrawable(ColorStateList.valueOf(0x40FFFFFF), layers, mask)
             isClickable = true
             isFocusable = true
+            contentDescription = key.label
             setOnClickListener {
-                haptic(it)
-                key.action()
-                refresh()
+                it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                press(key)
             }
         }
     }
 
-    // ---------- Input logic ----------
-
-    private fun isOperator(c: Char?) = c != null && c in "+−×÷"
-    private fun endsValue(c: Char?) = c != null && (c.isDigit() || c == ')' || c == '%' || c == '.')
-
-    /** Index where the number at the end of the expression starts. */
-    private fun currentNumberStart(): Int {
-        var i = expr.length
-        while (i > 0) {
-            val c = expr[i - 1]
-            if (c.isDigit() || c == '.' || c == 'e') i--
-            else if (c == '−' && i >= 2 && expr[i - 2] == 'e') i--
-            else break
-        }
-        return i
-    }
-
-    private fun currentNumber() = expr.substring(currentNumberStart())
-
-    private fun inputDigit(d: Char) {
-        if (justEvaluated) { expr = ""; justEvaluated = false }
-        val last = expr.lastOrNull()
-        if (last == ')' || last == '%') expr += "×"
-        val num = currentNumber()
-        if (!num.contains('e') && num.count { it.isDigit() } >= MAX_DIGITS) {
-            Toast.makeText(this, R.string.max_digits, Toast.LENGTH_SHORT).show()
-            return
-        }
-        expr = if (num == "0") expr.dropLast(1) + d else expr + d
-    }
-
-    private fun dot() {
-        if (justEvaluated) { expr = ""; justEvaluated = false }
-        val last = expr.lastOrNull()
-        if (last == ')' || last == '%') expr += "×"
-        val num = currentNumber()
-        if (num.contains('.') || num.contains('e')) return
-        expr += if (num.isEmpty()) "0." else "."
-    }
-
-    private fun operator(op: Char) {
-        justEvaluated = false
-        val last = expr.lastOrNull()
+    private fun press(key: Key) {
+        val shifted = key.shifted
         when {
-            last == null -> if (op == '−') expr = "−"
-            last == '(' -> if (op == '−') expr += "−"
-            last == 'e' -> return
-            isOperator(last) -> {
-                val unary = expr.length == 1 || expr[expr.length - 2] == '('
-                if (!unary) expr = expr.dropLast(1) + op
-            }
-            else -> expr += op
+            key.style == Style.SHIFT -> key.primary()
+            engine.shift && shifted != null -> { engine.shift = false; shifted() }
+            else -> { engine.shift = false; key.primary() }
         }
+        if (!key.keepsHyp) engine.hyp = false
+        render()
     }
 
-    private fun percent() {
-        justEvaluated = false
-        if (endsValue(expr.lastOrNull()) && expr.lastOrNull() != '.') expr += "%"
+    private fun render() {
+        val (m, e) = engine.display()
+        lcd.update(
+            m, e,
+            shift = engine.shift,
+            hyp = engine.hyp,
+            memory = engine.memory != 0.0,
+            paren = engine.openParens > 0,
+            angle = engine.angle.name,
+        )
     }
 
-    private fun paren() {
-        justEvaluated = false
-        val open = expr.count { it == '(' } - expr.count { it == ')' }
-        val last = expr.lastOrNull()
-        if (open > 0 && endsValue(last)) {
-            expr += ")"
-        } else {
-            if (endsValue(last)) expr += "×"
-            expr += "("
-        }
-    }
-
-    /** ± : wraps the current number as (−n), or unwraps it. */
-    private fun negate() {
-        justEvaluated = false
-        val start = currentNumberStart()
-        val num = expr.substring(start)
-        when {
-            start >= 2 && expr.substring(start - 2, start) == "(−" ->
-                expr = expr.substring(0, start - 2) + num
-            start == 1 && expr[0] == '−' ->
-                expr = num
-            num.isEmpty() -> {
-                val last = expr.lastOrNull()
-                if (last == ')' || last == '%') expr += "×"
-                expr += "(−"
-            }
-            else -> expr = expr.substring(0, start) + "(−" + num
-        }
-    }
-
-    private fun backspace() {
-        justEvaluated = false
-        expr = expr.dropLast(1)
-    }
-
-    private fun clear() {
-        expr = ""
-        justEvaluated = false
-    }
-
-    private fun equals() {
-        if (expr.isEmpty() || justEvaluated) return
-        try {
-            expr = Evaluator.format(Evaluator.evaluate(prepare(expr)))
-            justEvaluated = true
-        } catch (e: CalcException) {
-            pendingError = if (e.kind == CalcException.Kind.DIV_ZERO) R.string.error_div0 else R.string.error_syntax
-        } catch (e: Exception) {
-            pendingError = R.string.error_syntax
-        }
-    }
-
-    /** Drops a dangling operator / '(' and closes open parentheses. */
-    private fun prepare(e: String): String {
-        var s = e
-        while (s.isNotEmpty() && (isOperator(s.last()) || s.last() == '(' || s.last() == 'e')) s = s.dropLast(1)
-        val open = s.count { it == '(' } - s.count { it == ')' }
-        return s + ")".repeat(maxOf(open, 0))
-    }
-
-    private fun hasOperation(e: String) = e.any { it in "+×÷%(" } || e.drop(1).contains('−')
-
-    // ---------- Display ----------
-
-    private fun refresh() {
-        expressionView.text = expr
-        val error = pendingError
-        if (error != null) {
-            pendingError = null
-            resultView.setTextColor(getColor(R.color.error))
-            resultView.setText(error)
-            return
-        }
-        resultView.setTextColor(getColor(R.color.muted))
-        resultView.text = if (justEvaluated || !hasOperation(expr)) "" else preview()
-    }
-
-    private fun preview(): String = try {
-        Evaluator.format(Evaluator.evaluate(prepare(expr)))
-    } catch (e: Exception) {
-        ""
-    }
-
-    private fun haptic(v: View) {
-        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-    }
+    private fun html(s: String) = Html.fromHtml(s, Html.FROM_HTML_MODE_LEGACY)
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val STATE_EXPR = "expr"
-        private const val STATE_EVALUATED = "evaluated"
-        private const val MAX_DIGITS = 15
+        private const val PREFS = "calc"
+        private const val PREF_MEMORY = "memory"
+        private const val PREF_ANGLE = "angle"
     }
 }
